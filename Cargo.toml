@@ -1,0 +1,19 @@
+[package]
+name = "pito-jev"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+description = "A small blocking client for Jev's systemone API: yes/no and choice questions about a state, with a 2 s deadline, size caps and typed answers, failures and billing"
+license = "MIT"
+repository = "https://github.com/gmrdad82/pito-jev"
+homepage = "https://pitomd.com"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "pito_jev"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+ureq = { version = "~3.4", default-features = false, features = ["rustls"] }
