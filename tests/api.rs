@@ -5,10 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
 
-use pito_jev::{
-    Answer, Billing, Client, Failure, Key, MOST_BODY, Question, Usage, billing_of, body,
-    failure_of, reply_of,
-};
+use pito_jev::{Billing, Client, Failure, Key, Question, Usage, body};
 use serde_json::{Value, json};
 
 struct Heard {
@@ -88,15 +85,21 @@ fn serve(status: u16, headers: &[(&str, &str)], body: &str) -> Fake {
 }
 
 fn silent() -> Fake {
+    stalled("")
+}
+
+fn stalled(sent: &str) -> Fake {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/api/v1/systemone", listener.local_addr().unwrap());
     let heard = Arc::new(Mutex::new(Vec::new()));
     let log = heard.clone();
+    let sent = sent.to_string();
     let (hold, wait) = mpsc::channel::<()>();
     std::thread::spawn(move || {
-        if let Ok((stream, _)) = listener.accept() {
+        if let Ok((mut stream, _)) = listener.accept() {
             let request = read_request(&stream);
             log.lock().unwrap().push(request);
+            let _ = stream.write_all(sent.as_bytes());
             let _ = wait.recv();
             drop(stream);
         }
@@ -135,38 +138,6 @@ fn yes_no() -> Question {
         no: None,
         ..Question::default()
     }
-}
-
-#[test]
-fn a_choice_reads_its_pick_with_its_probability_or_the_confidence() {
-    let answer: Answer = serde_json::from_value(
-        json!({"type": "choice", "choice": "c2", "probabilities": {"c1": 0.1, "c2": 0.9}}),
-    )
-    .unwrap();
-    assert_eq!(answer.picked(), Some(("c2".to_string(), 0.9)));
-    let answer: Answer =
-        serde_json::from_value(json!({"type": "choice", "choice": "c2", "confidence": 0.7}))
-            .unwrap();
-    assert_eq!(answer.picked(), Some(("c2".to_string(), 0.7)));
-    let answer: Answer =
-        serde_json::from_value(json!({"type": "choice", "choice": "", "confidence": 0.7})).unwrap();
-    assert_eq!(answer.picked(), None);
-    let answer: Answer = serde_json::from_value(
-        json!({"type": "choice", "choice": "c1", "probabilities": {"c1": 1.5}}),
-    )
-    .unwrap();
-    assert_eq!(answer.picked(), None);
-    let question = Question {
-        instructions: "which?".into(),
-        options: vec![("c1".into(), Some("first".into())), ("hold".into(), None)],
-        ..Question::default()
-    };
-    let text = body("m", &json!({}), &[("next", question)]).unwrap();
-    let value: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        value["questions"]["next"],
-        json!({"type": "choice", "instructions": "which?", "criteria": {"c1": "first", "hold": null}})
-    );
 }
 
 #[test]
@@ -302,136 +273,6 @@ fn a_closed_port_is_unreached() {
 }
 
 #[test]
-fn the_live_client_aims_at_jev_with_a_two_second_deadline() {
-    let live = Client::live();
-    assert_eq!(live.url, "https://jev-ai.pro/api/v1/systemone");
-    assert_eq!(live.deadline, Duration::from_secs(2));
-}
-
-#[test]
-fn bodies_hold_jevs_shape_and_limits() {
-    let text = body("m", &json!("text"), &[("a", yes_no()), ("b", yes_no())]).unwrap();
-    let value: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(value["model"], "m");
-    assert_eq!(value["state"], "text");
-    assert_eq!(value["questions"]["b"]["type"], "noul");
-    assert_eq!(
-        value["questions"]["a"]["instructions"],
-        "Is this train ready to merge?"
-    );
-    assert!(body("m", &json!({}), &[]).is_err());
-    let many: Vec<(&str, Question)> = (0..65).map(|_| ("a", yes_no())).collect();
-    assert!(
-        body("m", &json!({}), &many)
-            .unwrap_err()
-            .contains("1 to 64")
-    );
-    assert!(
-        body("m", &json!({}), &[("a", yes_no()), ("a", yes_no())])
-            .unwrap_err()
-            .contains("twice")
-    );
-    let bare = Question {
-        instructions: "?".into(),
-        yes: None,
-        no: None,
-        ..Question::default()
-    };
-    let text = body("m", &json!({}), &[("a", bare)]).unwrap();
-    let value: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        value["questions"]["a"],
-        json!({"type": "noul", "instructions": "?"})
-    );
-    let both = Question {
-        instructions: "?".into(),
-        yes: Some("y".into()),
-        no: Some("n".into()),
-        ..Question::default()
-    };
-    let text = body("m", &json!({}), &[("a", both)]).unwrap();
-    let value: Value = serde_json::from_str(&text).unwrap();
-    assert_eq!(
-        value["questions"]["a"]["criteria"],
-        json!({"true": "y", "false": "n"})
-    );
-    let huge = json!("x".repeat(MOST_BODY));
-    assert!(
-        body("m", &huge, &[("a", yes_no())])
-            .unwrap_err()
-            .contains("256000")
-    );
-}
-
-#[test]
-fn a_yes_needs_its_probability_in_range() {
-    let answer = |value: Value| -> Answer { serde_json::from_value(value).unwrap() };
-    assert_eq!(
-        answer(json!({"type": "noul", "noul": 1.0})).yes(),
-        Some(1.0)
-    );
-    assert_eq!(
-        answer(json!({"type": "noul", "noul": 0.0})).yes(),
-        Some(0.0)
-    );
-    assert_eq!(answer(json!({"type": "noul"})).yes(), None);
-    assert_eq!(answer(json!({"type": "noul", "noul": 1.5})).yes(), None);
-    assert_eq!(answer(json!({"type": "noul", "noul": -0.1})).yes(), None);
-    let reply = reply_of(r#"{"answers":{"x":{"type":"noul","noul":0.7}}}"#).unwrap();
-    assert_eq!(reply.answer("x").unwrap().noul, Some(0.7));
-    assert_eq!(reply.answer("y"), None);
-}
-
-#[test]
-fn billing_headers_that_do_not_read_are_left_out() {
-    let billing = billing_of(&|name| match name {
-        "x-jev-run-id" => Some("  ".into()),
-        "x-jev-credits-charged" => Some("NaN".into()),
-        "x-jev-credits-remaining" => Some("12".into()),
-        _ => None,
-    });
-    assert_eq!(
-        billing,
-        Billing {
-            run_id: None,
-            credits_charged: None,
-            tokens_remaining: None,
-            credits_remaining: Some(12.0),
-        }
-    );
-}
-
-#[test]
-fn a_429_names_its_wait_and_others_none() {
-    assert_eq!(Failure::Limited(Some(30)).retry_after_ms(), Some(30_000));
-    assert_eq!(Failure::Limited(None).retry_after_ms(), None);
-    assert_eq!(Failure::Unknown.retry_after_ms(), None);
-    assert_eq!(failure_of(429, Some(" 7 "), ""), Failure::Limited(Some(7)));
-    assert_eq!(failure_of(429, Some("soon"), ""), Failure::Limited(None));
-    assert_eq!(
-        failure_of(418, None, "nope"),
-        Failure::Other(418, String::new())
-    );
-    assert_eq!(
-        Failure::Other(418, String::new()).words(),
-        "418: Jev answered 418"
-    );
-}
-
-#[test]
-fn a_key_is_one_word_and_never_shows_itself() {
-    let key = Key::new("  jev-test-key-0001\n").unwrap();
-    assert_eq!(Key::new("jev-test-key-0001"), Some(key.clone()));
-    assert_eq!(format!("{key:?}"), "Key(hidden)");
-    assert_eq!(format!("{key}"), "hidden");
-    assert_eq!(format!("{:?}", Some(&key)), "Some(Key(hidden))");
-    assert_eq!(Key::new(""), None);
-    assert_eq!(Key::new("   "), None);
-    assert_eq!(Key::new("two words"), None);
-    assert_eq!(Key::new("tab\tinside"), None);
-}
-
-#[test]
 fn a_trimmed_key_rides_the_header_as_given() {
     let fake = serve(200, &[], ANSWERED);
     let key = Key::new("\tjev-test-key-0002 \n").unwrap();
@@ -445,60 +286,16 @@ fn a_trimmed_key_rides_the_header_as_given() {
 }
 
 #[test]
-fn a_failure_reads_as_its_words_and_is_an_error() {
-    let failure = Failure::Limited(Some(30));
-    assert_eq!(failure.to_string(), failure.words());
-    assert_eq!(
-        failure.to_string(),
-        "429: Jev is rate limiting; no call for 30 s"
-    );
-    let error: Box<dyn std::error::Error> = Box::new(Failure::BadKey);
-    assert_eq!(error.to_string(), "401: Jev refused the key");
-    assert_eq!(
-        Failure::BadBody("x".into()).words(),
-        "422: Jev refused the body (x); never sent again unchanged"
-    );
-    assert_eq!(Failure::NoBalance.words(), "402: Jev's balance is spent");
-    assert_eq!(Failure::Unavailable(503).words(), "503: Jev is unavailable");
-    assert_eq!(Failure::Unknown.words(), "504: Jev's outcome is unknown");
-    assert_eq!(
-        Failure::Unreached("the connection was refused".into()).words(),
-        "Jev was not reached: the connection was refused"
-    );
-    assert_eq!(
-        Failure::Malformed("eof".into()).words(),
-        "Jev's answer did not read: eof"
-    );
-    assert_eq!(Failure::Other(500, "boom".into()).words(), "500: boom");
-}
-
-#[test]
-fn what_jev_said_is_clipped_to_two_hundred_characters() {
-    let long = "é".repeat(500);
-    let body = json!({"error": {"message": long}}).to_string();
-    let Failure::BadBody(said) = failure_of(422, None, &body) else {
-        panic!("not a 422");
-    };
-    assert_eq!(said.chars().count(), 200);
-    assert!(said.ends_with('…'));
-    assert_eq!(
-        failure_of(422, None, r#"{"error":{"code":"invalid"}}"#),
-        Failure::BadBody("invalid".into())
-    );
-    assert_eq!(failure_of(422, None, "{}"), Failure::BadBody(String::new()));
-}
-
-#[test]
 fn a_reply_over_the_cap_is_malformed_and_not_read_whole() {
     let huge = format!(
         r#"{{"model":"m","answers":{{}},"pad":"{}"}}"#,
         "x".repeat(pito_jev::MOST_REPLY as usize)
     );
     let fake = serve(200, &[], &huge);
-    assert!(matches!(
+    assert_eq!(
         client(&fake).ask(&key(), "{}"),
-        Err(Failure::Malformed(_))
-    ));
+        Err(Failure::Malformed("the reply is over 1 MiB".into()))
+    );
 }
 
 #[test]
@@ -513,25 +310,36 @@ fn an_empty_reply_object_reads_as_no_answers() {
 }
 
 #[test]
-fn questions_keep_the_order_they_are_given() {
-    let ids = ["zeta", "alpha", "mid"];
-    let questions: Vec<(&str, Question)> = ids.iter().map(|id| (*id, yes_no())).collect();
-    let text = body(pito_jev::MODEL, &json!({}), &questions).unwrap();
-    let value: Value = serde_json::from_str(&text).unwrap();
-    let order: Vec<&str> = value["questions"]
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(order, ids);
-    assert_eq!(value["model"], "jev-1.14.0");
-    let names: Vec<String> = (0..64).map(|n| format!("q{n}")).collect();
-    let full: Vec<(&str, Question)> = names.iter().map(|name| (name.as_str(), yes_no())).collect();
-    assert!(body("m", &json!({}), &full).is_ok());
+fn a_reply_that_stops_halfway_runs_into_the_deadline() {
+    let fake = stalled(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"model\":",
+    );
+    let began = std::time::Instant::now();
+    assert_eq!(client(&fake).ask(&key(), "{}"), Err(Failure::Deadline));
+    assert!(began.elapsed() >= Duration::from_millis(300));
+    assert_eq!(fake.heard().len(), 1);
 }
 
 #[test]
-fn the_default_client_is_the_live_one() {
-    assert_eq!(Client::default(), Client::live());
+fn a_reply_cut_short_is_malformed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/api/v1/systemone", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            read_request(&stream);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{\"model\":",
+            );
+        }
+    });
+    let client = Client {
+        url,
+        deadline: Duration::from_millis(2_000),
+    };
+    let began = std::time::Instant::now();
+    assert!(matches!(
+        client.ask(&key(), "{}"),
+        Err(Failure::Malformed(why)) if !why.is_empty()
+    ));
+    assert!(began.elapsed() < Duration::from_millis(2_000));
 }

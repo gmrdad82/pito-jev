@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -281,6 +283,7 @@ fn http_reason(error: &ureq::Error) -> String {
         }
         ureq::Error::Io(io) => io.kind().to_string(),
         ureq::Error::Timeout(_) => "it timed out".into(),
+        ureq::Error::BodyExceedsLimit(_) => "the reply is over 1 MiB".into(),
         ureq::Error::HostNotFound => "the host wasn't found".into(),
         ureq::Error::ConnectionFailed => "the connection failed".into(),
         _ => "the request failed".into(),
@@ -351,3 +354,6 @@ impl Client {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;
