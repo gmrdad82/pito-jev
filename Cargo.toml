@@ -1,6 +1,6 @@
 [package]
 name = "pito-jev"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97"
 description = "A small blocking client for Jev's systemone API: yes/no and choice questions about a state, with a 2 s deadline, size caps and typed answers, failures and billing"
